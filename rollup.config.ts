@@ -41,6 +41,7 @@ const buildEsm = {
     'src/index.ts',
     'src/rest.ts',
     'src/graphql.ts',
+    'src/ws/ws.ts',
     'src/context/index.ts',
   ],
   output: {
