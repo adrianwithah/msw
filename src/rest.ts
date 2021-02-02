@@ -67,7 +67,9 @@ export interface ParsedRestRequest {
   match: ReturnType<typeof matchRequestUrl>
 }
 
-const createRestHandler = (method: RESTMethods) => {
+const createRestHandler = (
+  method: RESTMethods,
+) => {
   return <
     RequestBodyType = DefaultRequestBodyType,
     ResponseBodyType = any,
@@ -79,6 +81,7 @@ const createRestHandler = (method: RESTMethods) => {
       typeof restContext,
       ResponseBodyType
     >,
+    performanceModelEndpoint?: string
   ): RequestHandler<
     MockedRequest<RequestBodyType, RequestParamsType>,
     typeof restContext,
@@ -172,6 +175,7 @@ ${queryParams
           header: `[rest] ${method} ${mask.toString()}`,
           mask,
           callFrame,
+          performanceModelEndpoint: performanceModelEndpoint
         }
       },
     }

@@ -13,6 +13,7 @@ export interface ServerLifecycleEventsMap {
 }
 
 export interface SetupServerApi {
+  runtimes(): Promise<any>
   /**
    * Starts requests interception based on the previously provided request handlers.
    * @see {@link https://mswjs.io/docs/api/setup-server/listen `server.listen()`}

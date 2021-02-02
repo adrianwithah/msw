@@ -69,6 +69,9 @@ const buildUmd = {
 const buildNode = {
   input: 'src/node/index.ts',
   external: [
+    'url',
+    'zlib',
+    'axios',
     'http',
     'https',
     'util',

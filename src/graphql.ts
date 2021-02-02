@@ -101,6 +101,7 @@ function graphQLRequestHandler<QueryType, VariablesType = Record<string, any>>(
   expectedOperationName: GraphQLRequestHandlerSelector,
   mask: Mask,
   resolver: GraphQLResponseResolver<QueryType, VariablesType>,
+  performanceModelEndpoint?: string
 ): RequestHandler<
   GraphQLMockedRequest<VariablesType>,
   GraphQLMockedContext,
@@ -228,18 +229,20 @@ function graphQLRequestHandler<QueryType, VariablesType = Record<string, any>>(
         header,
         mask,
         callFrame,
+        performanceModelEndpoint: performanceModelEndpoint
       }
-    },
+    }
   }
 }
 
 const createGraphQLScopedHandler = (
   expectedOperationType: ExpectedOperationTypeNode,
-  mask: Mask,
+  mask: Mask
 ) => {
   return <QueryType, VariablesType = Record<string, any>>(
     expectedOperationName: GraphQLRequestHandlerSelector,
     resolver: GraphQLResponseResolver<QueryType, VariablesType>,
+    performanceModelEndpoint?: string
   ): RequestHandler<
     GraphQLMockedRequest<VariablesType>,
     GraphQLMockedContext,
@@ -250,6 +253,7 @@ const createGraphQLScopedHandler = (
       expectedOperationName,
       mask,
       resolver,
+      performanceModelEndpoint
     )
   }
 }

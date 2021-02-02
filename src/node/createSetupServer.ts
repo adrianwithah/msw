@@ -18,6 +18,15 @@ import { ServerLifecycleEventsMap, SetupServerApi } from './glossary'
 import { SharedOptions } from '../sharedOptions'
 import { uuidv4 } from '../utils/internal/uuidv4'
 import { request } from 'express'
+import axios from 'axios'
+
+type PostRequestBody = {
+  sampleRequests: {
+    endpoint: string,
+    restMethod: string,
+    numberOfSamples: number
+  }[]
+}
 
 const DEFAULT_LISTEN_OPTIONS: SharedOptions = {
   onUnhandledRequest: 'bypass',
@@ -28,6 +37,7 @@ const DEFAULT_LISTEN_OPTIONS: SharedOptions = {
  * Useful to generate identical API using different patches to request issuing modules.
  */
 export function createSetupServer(...interceptors: Interceptor[]) {
+
   const emitter = new StrictEventEmitter<ServerLifecycleEventsMap>()
 
   return function setupServer(
@@ -62,8 +72,90 @@ export function createSetupServer(...interceptors: Interceptor[]) {
       }
     })
 
+    let requestHandlerInvocations: { [key: string]: number; } = {}
+    currentHandlers.forEach((handler) => {
+      requestHandlerInvocations[handler.getMetaInfo().header] = 0
+    })
+
     return {
+      async runtimes() {
+        
+        let numberOfSamples = 100;
+        let postRequestBodies: { [key: string]: PostRequestBody } = {}
+        
+        currentHandlers.forEach((handler) => {
+          let metaInfo = handler.getMetaInfo();
+
+          // Skip non-rest handlers for now.
+          if (metaInfo.type != 'rest') {
+            console.warn(`Skipping runtime fetch for non-rest handler type: ${metaInfo.type}`);
+            return;
+          }
+
+          // Skip RegExp masks for now.
+          if (metaInfo.mask instanceof RegExp) {
+            console.warn(`Skipping runtime fetch for RegExp endpoint: ${metaInfo.mask.toString()}`);
+            return;
+          }
+
+          let firstSpaceIndex = metaInfo.header.indexOf(" ");
+          let secondSpaceIndex = metaInfo.header.indexOf(" ", firstSpaceIndex + 1);
+
+          if (firstSpaceIndex == -1 || secondSpaceIndex == -1) {
+            console.warn(`Unrecognised meta header found in setupServer handler: ${metaInfo.header}`);
+            return;
+          }
+
+          let restMethod = metaInfo.header.substring(firstSpaceIndex + 1, secondSpaceIndex);
+          let endpoint = metaInfo.header.substring(secondSpaceIndex + 1);
+
+          if (metaInfo.performanceModelEndpoint != undefined) {
+
+            if (!postRequestBodies.hasOwnProperty(metaInfo.performanceModelEndpoint)) {
+              postRequestBodies[metaInfo.performanceModelEndpoint] = {
+                sampleRequests: []
+              }
+            }
+
+            postRequestBodies[metaInfo.performanceModelEndpoint].sampleRequests.push({
+              "restMethod": restMethod,
+              "endpoint": endpoint,
+              "numberOfSamples": numberOfSamples
+            });
+          }
+        });
+
+        // Send GET request with rest methods and endpoints to ProdModelService
+        // Create promise that resolves by combining the runtimes? I want to be able to assert on multiples, so return dictionary of runtimes.
+        let sampleRequestPromises = []
+        for (const [key, value] of Object.entries(postRequestBodies)) {
+          sampleRequestPromises.push(
+            axios.post(`${key}/sample`, value)
+              .then((response) => {
+                // Contains the sample results of multiple models
+                let sampleResultsMultipleModels = response.data
+
+                // Relies on the convention of getMetaInfo().header for rest.ts
+                // `[rest] ${method} ${mask.toString()}` for non-mask entries
+                let aggregatedResponses = sampleResultsMultipleModels.map((modelSampleResult: any) => {
+                  let header = `[rest] ${modelSampleResult["restMethod"]} ${modelSampleResult["endpoint"]}`
+                  return {
+                    "handlerHeader": header,
+                    "invocationCount": requestHandlerInvocations[header],
+                    "averageResponseTime": modelSampleResult["sampledResponseTimes"].reduce((a: number, b: number) => a + b, 0) / modelSampleResult["sampledResponseTimes"].length
+                  }
+                })
+                
+                return aggregatedResponses
+              }))          
+        }
+        
+        return Promise.all(sampleRequestPromises).then((sampleResponsesMultipleModelSvcs: any[]) => {
+          return [].concat.apply([], sampleResponsesMultipleModelSvcs)
+        })
+      },
       listen(options) {
+
         const resolvedOptions = Object.assign(
           {},
           DEFAULT_LISTEN_OPTIONS,
@@ -71,6 +163,7 @@ export function createSetupServer(...interceptors: Interceptor[]) {
         )
 
         interceptor.use(async (req) => {
+
           const requestId = uuidv4()
 
           const requestHeaders = new Headers(
@@ -139,6 +232,16 @@ export function createSetupServer(...interceptors: Interceptor[]) {
           }
 
           emitter.emit('request:match', mockedRequest)
+
+          // Match registered, we track invocation count.
+          if (handler != undefined) {
+            let handlerHeader = handler.getMetaInfo().header
+            if (requestHandlerInvocations.hasOwnProperty(handlerHeader)) {
+              requestHandlerInvocations[handler.getMetaInfo().header] += 1
+            } else {
+              console.warn("Handler found whose invocation is not being tracked!" + handlerHeader);
+            }
+          }
 
           return new Promise<MockedInterceptedResponse>((resolve) => {
             const mockedResponse = {

@@ -68,6 +68,7 @@ export interface RequestHandlerMetaInfo<Type = RequestHandlerType> {
   header: string
   mask: Mask
   callFrame: string | undefined
+  performanceModelEndpoint: string | undefined
 }
 
 export interface RequestHandler<
