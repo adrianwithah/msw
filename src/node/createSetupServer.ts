@@ -18,7 +18,8 @@ import { ServerLifecycleEventsMap, SetupServerApi } from './glossary'
 import { SharedOptions } from '../sharedOptions'
 import { uuidv4 } from '../utils/internal/uuidv4'
 import { request } from 'express'
-import axios from 'axios'
+import axios, { AxiosError } from 'axios'
+import { rejects } from 'assert'
 
 type PostRequestBody = {
   sampleRequests: {
@@ -130,7 +131,11 @@ export function createSetupServer(...interceptors: Interceptor[]) {
         let sampleRequestPromises = []
         for (const [key, value] of Object.entries(postRequestBodies)) {
           sampleRequestPromises.push(
-            axios.post(`${key}/sample`, value)
+            axios.post(`${key}/sample`, value, {
+              // Hack for Jest jsdom + axios combination
+              // https://github.com/axios/axios/issues/1180
+              adapter: require('axios/lib/adapters/http'),
+            })
               .then((response) => {
                 // Contains the sample results of multiple models
                 let sampleResultsMultipleModels = response.data
@@ -147,9 +152,13 @@ export function createSetupServer(...interceptors: Interceptor[]) {
                 })
                 
                 return aggregatedResponses
+              }, (error: AxiosError) => {
+                console.error(`Sample request failed for model endpoint: ${key}`)
+                console.error(error.message)
+                return null;
               }))          
         }
-        
+
         return Promise.all(sampleRequestPromises).then((sampleResponsesMultipleModelSvcs: any[]) => {
           return [].concat.apply([], sampleResponsesMultipleModelSvcs)
         })

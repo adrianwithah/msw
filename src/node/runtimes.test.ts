@@ -5,8 +5,8 @@ import axios from 'axios'
 import { rest } from '../rest'
 import { setupServer } from './setupServer'
 
-// const materialsModelEndpoint = "http://127.0.0.1:8080/"
-const materialsModelEndpoint = "https://prodmodelsvc.azurewebsites.net"
+const materialsModelEndpoint = "http://127.0.0.1:8080/"
+// const materialsModelEndpoint = "https://prodmodelsvc.azurewebsites.net"
 const localMaterialsEndpoint = "http://127.0.0.1:5000/resources?year=2020&course=20002"
 const otherMaterialsEndpoint = "http://127.0.0.1:5000/"
 
