@@ -21,6 +21,7 @@ import { getStatusCodeColor } from './utils/logging/getStatusCodeColor'
 import { jsonParse } from './utils/internal/jsonParse'
 import { matchRequestUrl } from './utils/matching/matchRequestUrl'
 import { getCallFrame } from './utils/internal/getCallFrame'
+import { PerformanceModelParameters } from './rest'
 
 type ExpectedOperationTypeNode = OperationTypeNode | 'all'
 
@@ -101,7 +102,7 @@ function graphQLRequestHandler<QueryType, VariablesType = Record<string, any>>(
   expectedOperationName: GraphQLRequestHandlerSelector,
   mask: Mask,
   resolver: GraphQLResponseResolver<QueryType, VariablesType>,
-  performanceModelEndpoint?: string
+  modelParameters?: PerformanceModelParameters
 ): RequestHandler<
   GraphQLMockedRequest<VariablesType>,
   GraphQLMockedContext,
@@ -229,7 +230,7 @@ function graphQLRequestHandler<QueryType, VariablesType = Record<string, any>>(
         header,
         mask,
         callFrame,
-        performanceModelEndpoint: performanceModelEndpoint
+        modelParameters: modelParameters
       }
     }
   }
@@ -242,7 +243,7 @@ const createGraphQLScopedHandler = (
   return <QueryType, VariablesType = Record<string, any>>(
     expectedOperationName: GraphQLRequestHandlerSelector,
     resolver: GraphQLResponseResolver<QueryType, VariablesType>,
-    performanceModelEndpoint?: string
+    modelParameters?: PerformanceModelParameters
   ): RequestHandler<
     GraphQLMockedRequest<VariablesType>,
     GraphQLMockedContext,
@@ -253,7 +254,7 @@ const createGraphQLScopedHandler = (
       expectedOperationName,
       mask,
       resolver,
-      performanceModelEndpoint
+      modelParameters
     )
   }
 }

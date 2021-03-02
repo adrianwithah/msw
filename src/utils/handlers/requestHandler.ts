@@ -5,6 +5,7 @@ import { status } from '../../context/status'
 import { set } from '../../context/set'
 import { delay } from '../../context/delay'
 import { fetch } from '../../context/fetch'
+import { PerformanceModelParameters } from '../../rest'
 
 export const defaultContext = {
   status,
@@ -68,7 +69,7 @@ export interface RequestHandlerMetaInfo<Type = RequestHandlerType> {
   header: string
   mask: Mask
   callFrame: string | undefined
-  performanceModelEndpoint: string | undefined
+  modelParameters: PerformanceModelParameters | undefined
 }
 
 export interface RequestHandler<

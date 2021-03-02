@@ -8,7 +8,7 @@ import {
   Interceptor,
 } from 'node-request-interceptor'
 import { RequestHandlersList } from '../setupWorker/glossary'
-import { MockedRequest } from '../utils/handlers/requestHandler'
+import { MockedRequest, RequestHandlerMetaInfo } from '../utils/handlers/requestHandler'
 import { getResponse } from '../utils/getResponse'
 import { parseBody } from '../utils/request/parseBody'
 import { isNodeProcess } from '../utils/internal/isNodeProcess'
@@ -21,6 +21,18 @@ import { request } from 'express'
 import axios, { AxiosError } from 'axios'
 import { rejects } from 'assert'
 
+export type EndpointPerformanceReport = {
+  handlerHeader: string,
+  invocationCount: number,
+  averageResponseTime: number
+}
+
+type PostResponseBody = {
+  endpoint: string,
+  restMethod: string,
+  sampledResponseTimes: number[]
+}
+
 type PostRequestBody = {
   sampleRequests: {
     endpoint: string,
@@ -28,6 +40,13 @@ type PostRequestBody = {
     numberOfSamples: number
   }[]
 }
+
+type ModelServiceSampleResult = {
+  header: string,
+  sampledResponseTimes: number[]
+}
+
+type ModelServiceResponse = ModelServiceSampleResult[]
 
 const DEFAULT_LISTEN_OPTIONS: SharedOptions = {
   onUnhandledRequest: 'bypass',
@@ -74,94 +93,59 @@ export function createSetupServer(...interceptors: Interceptor[]) {
     })
 
     let requestHandlerInvocations: { [key: string]: number; } = {}
+    let metaInfoIndexedByHeader: { [key: string]: RequestHandlerMetaInfo } = {}
     currentHandlers.forEach((handler) => {
       requestHandlerInvocations[handler.getMetaInfo().header] = 0
+      metaInfoIndexedByHeader[handler.getMetaInfo().header] = handler.getMetaInfo()
     })
+    let runtimeSamples: ModelServiceSampleResult[] | undefined = undefined
+    let resolverDelaysIndexedByHeader: { [key: string]: number } = {}    
 
     return {
-      async runtimes() {
-        
-        let numberOfSamples = 100;
-        let postRequestBodies: { [key: string]: PostRequestBody } = {}
-        
-        currentHandlers.forEach((handler) => {
-          let metaInfo = handler.getMetaInfo();
-
-          // Skip non-rest handlers for now.
-          if (metaInfo.type != 'rest') {
-            console.warn(`Skipping runtime fetch for non-rest handler type: ${metaInfo.type}`);
-            return;
-          }
-
-          // Skip RegExp masks for now.
-          if (metaInfo.mask instanceof RegExp) {
-            console.warn(`Skipping runtime fetch for RegExp endpoint: ${metaInfo.mask.toString()}`);
-            return;
-          }
-
-          let firstSpaceIndex = metaInfo.header.indexOf(" ");
-          let secondSpaceIndex = metaInfo.header.indexOf(" ", firstSpaceIndex + 1);
-
-          if (firstSpaceIndex == -1 || secondSpaceIndex == -1) {
-            console.warn(`Unrecognised meta header found in setupServer handler: ${metaInfo.header}`);
-            return;
-          }
-
-          let restMethod = metaInfo.header.substring(firstSpaceIndex + 1, secondSpaceIndex);
-          let endpoint = metaInfo.header.substring(secondSpaceIndex + 1);
-
-          if (metaInfo.performanceModelEndpoint != undefined) {
-
-            if (!postRequestBodies.hasOwnProperty(metaInfo.performanceModelEndpoint)) {
-              postRequestBodies[metaInfo.performanceModelEndpoint] = {
-                sampleRequests: []
-              }
-            }
-
-            postRequestBodies[metaInfo.performanceModelEndpoint].sampleRequests.push({
-              "restMethod": restMethod,
-              "endpoint": endpoint,
-              "numberOfSamples": numberOfSamples
-            });
-          }
-        });
-
-        // Send GET request with rest methods and endpoints to ProdModelService
-        // Create promise that resolves by combining the runtimes? I want to be able to assert on multiples, so return dictionary of runtimes.
-        let sampleRequestPromises = []
-        for (const [key, value] of Object.entries(postRequestBodies)) {
-          sampleRequestPromises.push(
-            axios.post(`${key}/sample`, value, {
-              // Hack for Jest jsdom + axios combination
-              // https://github.com/axios/axios/issues/1180
-              adapter: require('axios/lib/adapters/http'),
-            })
-              .then((response) => {
-                // Contains the sample results of multiple models
-                let sampleResultsMultipleModels = response.data
-
-                // Relies on the convention of getMetaInfo().header for rest.ts
-                // `[rest] ${method} ${mask.toString()}` for non-mask entries
-                let aggregatedResponses = sampleResultsMultipleModels.map((modelSampleResult: any) => {
-                  let header = `[rest] ${modelSampleResult["restMethod"]} ${modelSampleResult["endpoint"]}`
-                  return {
-                    "handlerHeader": header,
-                    "invocationCount": requestHandlerInvocations[header],
-                    "averageResponseTime": modelSampleResult["sampledResponseTimes"].reduce((a: number, b: number) => a + b, 0) / modelSampleResult["sampledResponseTimes"].length
-                  }
-                })
-                
-                return aggregatedResponses
-              }, (error: AxiosError) => {
-                console.error(`Sample request failed for model endpoint: ${key}`)
-                console.error(error.message)
-                return null;
-              }))          
+      async registerModelSampleDelays() {
+        if (runtimeSamples == undefined) {
+          runtimeSamples = await getRuntimeSamplesForModels(currentHandlers)
         }
 
-        return Promise.all(sampleRequestPromises).then((sampleResponsesMultipleModelSvcs: any[]) => {
-          return [].concat.apply([], sampleResponsesMultipleModelSvcs)
+        runtimeSamples.forEach((modelSampleResult: ModelServiceSampleResult) => {
+          // Relies on the convention of getMetaInfo().header for rest.ts
+          // `[rest] ${method} ${mask.toString()}` for non-mask entries
+          let header = modelSampleResult.header
+          let averageResponseTime = modelSampleResult["sampledResponseTimes"].reduce((a: number, b: number) => a + b, 0) / modelSampleResult["sampledResponseTimes"].length
+          resolverDelaysIndexedByHeader[header] = averageResponseTime
         })
+
+      },
+      async runtimes() {
+        if (runtimeSamples == undefined) {
+          runtimeSamples = await getRuntimeSamplesForModels(currentHandlers)
+        }
+        let aggregatedResponses = runtimeSamples.map((modelSampleResult: ModelServiceSampleResult) => {
+          // Relies on the convention of getMetaInfo().header for rest.ts
+          // `[rest] ${method} ${mask.toString()}` for non-mask entries
+          let header = modelSampleResult.header
+  
+          let averageResponseTime = modelSampleResult["sampledResponseTimes"].reduce((a: number, b: number) => a + b, 0) / modelSampleResult["sampledResponseTimes"].length
+  
+          if (!metaInfoIndexedByHeader.hasOwnProperty(header)) {
+            console.error("Something went wrong here! Header not recognised!")
+          } else {
+  
+            let modelParameters = metaInfoIndexedByHeader[header].modelParameters
+            if (modelParameters != undefined) {
+              averageResponseTime = averageResponseTime * (modelParameters.scale  ?? 1)
+            }
+  
+          }
+  
+          return {
+            "handlerHeader": header,
+            "invocationCount": requestHandlerInvocations[header],
+            "averageResponseTime": averageResponseTime
+          }
+        })
+
+        return aggregatedResponses
       },
       listen(options) {
 
@@ -260,6 +244,12 @@ export function createSetupServer(...interceptors: Interceptor[]) {
               body: response.body as string,
             }
 
+            // If mocked using performance model, impose delay!
+            if (handler != undefined) {
+              let header = handler.getMetaInfo().header
+              response.delay = resolverDelaysIndexedByHeader[header] ?? response.delay
+            }
+
             // the node build will use the timers module to ensure @sinon/fake-timers or jest fake timers
             // don't affect this timeout.
             setTimeout(() => {
@@ -307,4 +297,100 @@ ${bold(meta.header)}
       },
     }
   }
+}
+
+function getRuntimeSamplesForModels(
+  handlers: RequestHandlersList
+): Promise<ModelServiceSampleResult[]> {
+
+  let numberOfSamples = 100;
+  let postRequestBodies: { [key: string]: PostRequestBody } = {}
+  
+  // Here we iterate all registered handles in order to collate
+  // requests that will be made to each modelservice endpoint.
+  // An aggregate POST request body to each endpoint is then created.
+  handlers.forEach((handler) => {
+    let metaInfo = handler.getMetaInfo();
+
+    // Skip non-rest handlers for now.
+    if (metaInfo.type != 'rest') {
+      console.warn(`Skipping runtime fetch for non-rest handler type: ${metaInfo.type}`);
+      return;
+    }
+
+    // Skip RegExp masks for now.
+    if (metaInfo.mask instanceof RegExp) {
+      console.warn(`Skipping runtime fetch for RegExp endpoint: ${metaInfo.mask.toString()}`);
+      return;
+    }
+
+    let firstSpaceIndex = metaInfo.header.indexOf(" ");
+    let secondSpaceIndex = metaInfo.header.indexOf(" ", firstSpaceIndex + 1);
+
+    if (firstSpaceIndex == -1 || secondSpaceIndex == -1) {
+      console.warn(`Unrecognised meta header found in setupServer handler: ${metaInfo.header}`);
+      return;
+    }
+
+    let restMethod = metaInfo.header.substring(firstSpaceIndex + 1, secondSpaceIndex);
+    let endpoint = metaInfo.header.substring(secondSpaceIndex + 1);
+
+    if (metaInfo.modelParameters != undefined) {
+      
+      // Add to aggregated POST request for respective ModelService.
+      let modelEndpoint = metaInfo.modelParameters.endpoint
+
+      if (!postRequestBodies.hasOwnProperty(modelEndpoint)) {
+        postRequestBodies[modelEndpoint] = {
+          sampleRequests: []
+        }
+      }
+
+      postRequestBodies[modelEndpoint].sampleRequests.push({
+        "restMethod": restMethod,
+        "endpoint": endpoint,
+        "numberOfSamples": numberOfSamples
+      });
+    }
+  });
+
+  // Send POST request with rest methods and endpoints to ProdModelService
+  // Create promise that resolves by combining the runtimes? I want to be able to assert on multiples, so return dictionary of runtimes.
+  let sampleRequestPromises = []
+  for (const [modelServiceEndpoint, postRequestBody] of Object.entries(postRequestBodies)) {
+
+    let modelServicePromise = axios.post(`${modelServiceEndpoint}/sample`, postRequestBody, {
+      // Hack for Jest jsdom + axios combination
+      // https://github.com/axios/axios/issues/1180
+      adapter: require('axios/lib/adapters/http'),
+    }).then((response) => {
+
+      // Post-processing after recieving responses from each ModelService endpoint.
+
+      // Contains the sample results of multiple models
+      let responseJson: PostResponseBody[] = response.data
+      let modelServiceSampleResults: ModelServiceSampleResult[] = responseJson.map((sampleResponse: PostResponseBody) => {
+        return {
+          // Relies on the convention of getMetaInfo().header for rest.ts
+          // `[rest] ${method} ${mask.toString()}` for non-mask entries
+          header: `[rest] ${sampleResponse["restMethod"]} ${sampleResponse["endpoint"]}`,
+          sampledResponseTimes: sampleResponse.sampledResponseTimes
+        }
+      })
+
+      return modelServiceSampleResults      
+      
+    }, (error: AxiosError) => {
+      console.error(`Sample request failed for model endpoint: ${modelServiceEndpoint}`)
+      console.error(error.message)
+      return null;
+    })
+
+
+    sampleRequestPromises.push(modelServicePromise)          
+  }
+  return Promise.all(sampleRequestPromises).then((sampleResponsesMultipleModelSvcs: any[]) => {
+    return [].concat.apply([], sampleResponsesMultipleModelSvcs)
+  })
+
 }

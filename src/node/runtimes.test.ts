@@ -13,15 +13,21 @@ const otherMaterialsEndpoint = "http://127.0.0.1:5000/"
 const server = setupServer(
   rest.get(localMaterialsEndpoint, (req, res, ctx) => {
     return res(ctx.json([]))
-  }, materialsModelEndpoint),
+  }, {
+    endpoint: materialsModelEndpoint,
+    scale: 0.5
+  }),
   rest.get(otherMaterialsEndpoint, (req, res, ctx) => {
     return res(ctx.json([]))
-  }, materialsModelEndpoint),
+  }, {
+    endpoint: materialsModelEndpoint
+  }),
 )
 
 beforeAll(() => {
   // jest.spyOn(global.console, 'log').mockImplementation()
   server.listen()
+  jest.setTimeout(50000)
 })
 
 afterEach(() => {

@@ -2,6 +2,7 @@ import { MockedResponse as MockedInterceptedResponse } from 'node-request-interc
 import { SharedOptions } from '../sharedOptions'
 import { RequestHandlersList } from '../setupWorker/glossary'
 import { MockedRequest } from '../utils/handlers/requestHandler'
+import { EndpointPerformanceReport } from './createSetupServer'
 
 export interface ServerLifecycleEventsMap {
   'request:start': (req: MockedRequest) => void
@@ -13,7 +14,8 @@ export interface ServerLifecycleEventsMap {
 }
 
 export interface SetupServerApi {
-  runtimes(): Promise<any>
+  registerModelSampleDelays(): Promise<void>
+  runtimes(): Promise<EndpointPerformanceReport[]>
   /**
    * Starts requests interception based on the previously provided request handlers.
    * @see {@link https://mswjs.io/docs/api/setup-server/listen `server.listen()`}
