@@ -112,6 +112,17 @@ export function createSetupServer(...interceptors: Interceptor[]) {
           // `[rest] ${method} ${mask.toString()}` for non-mask entries
           let header = modelSampleResult.header
           let averageResponseTime = modelSampleResult["sampledResponseTimes"].reduce((a: number, b: number) => a + b, 0) / modelSampleResult["sampledResponseTimes"].length
+          if (!metaInfoIndexedByHeader.hasOwnProperty(header)) {
+            console.error("Something went wrong here! Header not recognised!")
+          } else {
+  
+            let modelParameters = metaInfoIndexedByHeader[header].modelParameters
+            if (modelParameters != undefined) {
+              averageResponseTime = averageResponseTime * (modelParameters.scale  ?? 1)
+            }
+  
+          }
+
           resolverDelaysIndexedByHeader[header] = averageResponseTime
         })
 
@@ -230,7 +241,7 @@ export function createSetupServer(...interceptors: Interceptor[]) {
           if (handler != undefined) {
             let handlerHeader = handler.getMetaInfo().header
             if (requestHandlerInvocations.hasOwnProperty(handlerHeader)) {
-              requestHandlerInvocations[handler.getMetaInfo().header] += 1
+              requestHandlerInvocations[handlerHeader] += 1
             } else {
               console.warn("Handler found whose invocation is not being tracked!" + handlerHeader);
             }
@@ -248,6 +259,7 @@ export function createSetupServer(...interceptors: Interceptor[]) {
             if (handler != undefined) {
               let header = handler.getMetaInfo().header
               response.delay = resolverDelaysIndexedByHeader[header] ?? response.delay
+              console.log(`Imposing a delay of ${response.delay} for header: ${header}`)
             }
 
             // the node build will use the timers module to ensure @sinon/fake-timers or jest fake timers
