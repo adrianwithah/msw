@@ -3,6 +3,7 @@
  */
 import axios from 'axios'
 import { rest } from '../rest'
+import { PerformanceTest } from './createSetupServer'
 import { setupServer } from './setupServer'
 
 const materialsModelEndpoint = "http://localhost:8080/"
@@ -67,7 +68,7 @@ afterAll(() => {
 
 test (
   "Custom",
-  () => {
+  PerformanceTest(() => {
     let serviceClient = server.getTrackedServiceClient()
     let firstRequest = serviceClient.issueHttpRequest(localMaterialsEndpoint)
     let secondRequest = serviceClient.issueHttpRequest(otherMaterialsEndpoint)
@@ -88,7 +89,12 @@ test (
 
     // Wait for all promises to resolve
     return Promise.all([firstPromise, secondPromise]).then(() => console.log(server.getVirtualTimelineEvents()))
-  })
+  }, {
+    // Month is 0-indexed.
+    totalRuntimeExpectation: 0.001,
+    mockServer: server,
+    mutePerformanceCheckTill: new Date(Date.UTC(2021, 1, 25))
+  }), 50000)
 
 // test('Case 2 (sequential issue, sequential await)', async () => {
   

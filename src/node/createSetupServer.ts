@@ -18,6 +18,9 @@ import { ServerLifecycleEventsMap, SetupServerApi } from './glossary'
 import { SharedOptions } from '../sharedOptions'
 import { uuidv4 } from '../utils/internal/uuidv4'
 import axios, { AxiosError } from 'axios'
+import { writeFileSync, readFileSync } from 'fs';
+const ejs = require('ejs');
+const path = require("path");
 
 export type EndpointPerformanceReport = {
   aggregatedResponses: AggregatedResponse[],
@@ -137,9 +140,6 @@ function initVirtualTimeline(): VirtualTimeline {
     ) {
       stopwatch.stop()
 
-      console.log(`Real time elapsed: ${lastEventVirtualTimeMs + stopwatch.read()}`)
-      console.log(`Predicted time elapsed: ${virtualTimelineEvents[requestIdentifier].endTimeMs}`)
-
       let awaitTimeMs = Math.max(
         lastEventVirtualTimeMs + stopwatch.read(),
         virtualTimelineEvents[requestIdentifier].endTimeMs)
@@ -172,6 +172,116 @@ function initVirtualTimeline(): VirtualTimeline {
       return requestIdentifier
     }
   }
+}
+
+type PerformanceTestOptions = {
+  totalRuntimeExpectation: number,
+  mockServer: SetupServerApi | undefined,
+  mutePerformanceCheckTill: Date | undefined,
+}
+
+// Requires Jest + mswjs...? Need to decouple somehow? Unless we assume this is specific for each codebase, depending on frameworks used.
+export function PerformanceTest(
+  fn: () => Promise<any>,
+  options?: PerformanceTestOptions | undefined,
+): () => Promise<any> {
+
+  if (
+    options != undefined &&
+    options.mutePerformanceCheckTill != undefined &&
+    fn != undefined &&
+    options.mockServer != undefined
+  ) {
+    
+    let convertFailToWarn = false;
+
+    // If specified date has not passed, we convert failures to warnings.
+    let date_timezoned = new Date(); 
+    let date_utc =  Date.UTC(
+      date_timezoned.getUTCFullYear(),
+      date_timezoned.getUTCMonth(),
+      date_timezoned.getUTCDate(),
+      date_timezoned.getUTCHours(),
+      date_timezoned.getUTCMinutes(),
+      date_timezoned.getUTCSeconds())
+
+    if (date_utc < options.mutePerformanceCheckTill.getTime()) {
+      convertFailToWarn = true;
+    }
+
+    let mockServer = options.mockServer
+    
+    return async () => {
+
+      mockServer.startVirtualTimeline()
+      await fn();
+      mockServer.stopVirtualTimeline()
+      
+      let secondsElasped = mockServer.getVirtualTimelineDuration() / 1000
+
+      // Distribution of runtimes here.
+      // If mock server is passed, then we need to add mocked response times. 
+      let aggregatedResponses: AggregatedResponse[] = [{
+        handlerHeader: "Total",
+        invocationCount: 1,
+        averageResponseTime: secondsElasped
+      }]
+
+      if (options.mockServer != undefined) {
+        let endpointPerfReport = await options.mockServer.runtimes()
+
+        // Extract invocation counts and average response times
+        aggregatedResponses = aggregatedResponses.concat(endpointPerfReport.aggregatedResponses)
+
+        let events = mockServer.getVirtualTimelineEvents()
+        let invocationTimings: RequestHandlerInvocationTimings[] = events.map((event: VirtualTimelineEvent) => {
+          return {
+            handlerHeader: event.handlerHeader,
+            startTime: event.startTimeMs,
+            endTime: event.endTimeMs
+          }
+        })
+
+        genPerfReport(
+          invocationTimings,
+          mockServer.getVirtualTimelineDuration()
+        )
+      }
+
+      // Make check here
+      if (secondsElasped > options.totalRuntimeExpectation) {
+        let errorMessage = `Performance expectations not met. Expected: ${options.totalRuntimeExpectation}. Actual: ${secondsElasped}\n\n`
+
+        let breakdown = ""
+        aggregatedResponses.forEach((runtime) => {
+          breakdown += `${runtime.handlerHeader}: ${runtime.averageResponseTime} * ${runtime.invocationCount} = ${runtime.averageResponseTime * runtime.invocationCount}\n`
+        })
+        errorMessage += breakdown
+  
+        if (convertFailToWarn) {  
+          console.warn(errorMessage)  
+        } else {  
+          throw new Error(errorMessage)  
+        }
+      }
+    }
+
+  }
+
+  return fn
+}
+
+function genPerfReport(
+  invocationTimings: RequestHandlerInvocationTimings[],
+  fullDurationMs: number
+) {
+  let ejsString = readFileSync(path.resolve(__dirname, "../report.ejs"), 'utf-8')
+  let html = ejs.render(ejsString, {
+    invocationTimings: JSON.stringify(invocationTimings),
+    fullDuration: fullDurationMs
+  });    
+  const data = new Uint8Array(Buffer.from(html));
+  writeFileSync(`${process.cwd()}/report.html`, data);
 }
 
 function trackedRestRequest(

@@ -1,0 +1,43 @@
+<html>
+  <head>
+    <script type="text/javascript" src="https://www.gstatic.com/charts/loader.js"></script>
+    <script type="text/javascript">
+      google.charts.load("current", {packages:["timeline"]});
+      google.charts.setOnLoadCallback(drawChart);
+      function drawChart() {
+
+        const startTime = 0;
+        const invocationTimings = <%- invocationTimings %>;
+        const fullDuration = <%- fullDuration %>;
+
+        const dataTableRows = invocationTimings.map((invocationTiming) => {
+          return [invocationTiming.handlerHeader, new Date(startTime + invocationTiming.startTime), new Date(startTime + invocationTiming.endTime)]
+        })
+
+        var container = document.getElementById('example2.2');
+        var chart = new google.visualization.Timeline(container);
+        var dataTable = new google.visualization.DataTable();
+        dataTable.addColumn({ type: 'string', id: 'Name' });
+        dataTable.addColumn({ type: 'date', id: 'Start' });
+        dataTable.addColumn({ type: 'date', id: 'End' });
+        // dataTable.addRows([
+        //   [ 'George Washington', firstStartDate, firstEndDate ],
+        //   [ 'John Adams',        secondStartDate, secondEndDate ],
+        // ]);
+        dataTable.addRows(dataTableRows)
+
+        var options = {
+          hAxis: {
+            minValue: new Date(startTime),
+            maxValue: new Date(startTime + fullDuration)
+          }
+        };
+
+        chart.draw(dataTable, options);
+      }
+    </script>
+  </head>
+  <body>
+    <div id="example2.2"></div>
+  </body>
+</html>
