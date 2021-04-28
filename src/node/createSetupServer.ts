@@ -17,14 +17,23 @@ import { onUnhandledRequest } from '../utils/request/onUnhandledRequest'
 import { ServerLifecycleEventsMap, SetupServerApi } from './glossary'
 import { SharedOptions } from '../sharedOptions'
 import { uuidv4 } from '../utils/internal/uuidv4'
-import { request } from 'express'
 import axios, { AxiosError } from 'axios'
-import { rejects } from 'assert'
 
 export type EndpointPerformanceReport = {
+  aggregatedResponses: AggregatedResponse[],
+  invocationTimings: RequestHandlerInvocationTimings[]
+}
+
+export type AggregatedResponse = {
   handlerHeader: string,
   invocationCount: number,
   averageResponseTime: number
+}
+
+export type RequestHandlerInvocationTimings = {
+  handlerHeader: string,
+  startTime: number,
+  endTime: number
 }
 
 type PostResponseBody = {
@@ -41,6 +50,16 @@ type PostRequestBody = {
   }[]
 }
 
+interface VirtualTimeline {
+  start(): void
+  stop(): void
+  reset(): void
+  getEvents(): VirtualTimelineEvent[]
+  getDuration(): number
+  handleIssueEvent(handlerHeader: string, predictedTime: number): string
+  handleAwaitEvent(requestIdentifier: string): void
+}
+
 type ModelServiceSampleResult = {
   header: string,
   sampledResponseTimes: number[]
@@ -50,6 +69,217 @@ type ModelServiceResponse = ModelServiceSampleResult[]
 
 const DEFAULT_LISTEN_OPTIONS: SharedOptions = {
   onUnhandledRequest: 'bypass',
+}
+
+export type VirtualTimelineEvent = {
+  handlerHeader: string,
+  // Time it was issued
+  startTimeMs: number,
+  // Time it got awaited. Can be undefined if results never relied on.
+  awaitTimeMs: number | undefined
+  // Predicted time + issue time.
+  endTimeMs: number
+}
+
+export interface ServiceClientApi {
+  issueHttpRequest(link: string): TrackedRestRequest
+}
+
+interface Stopwatch {
+  start(): void
+  stop(): void
+  read(): number
+  reset(): void
+}
+
+interface TrackedRestRequest {
+  /**
+   * Attaches callbacks for the resolution and/or rejection of the Promise.
+   * @param onfulfilled The callback to execute when the Promise is resolved.
+   * @param onrejected The callback to execute when the Promise is rejected.
+   * @returns A Promise for the completion of which ever callback is executed.
+   */
+   unwrap<TResult1 = Response, TResult2 = never>(
+    onfulfilled?: ((value: Response) => TResult1 | PromiseLike<TResult1>) | undefined | null,
+    onrejected?: ((reason: any) => TResult2 | PromiseLike<TResult2>) | undefined | null,
+  ): Promise<TResult1 | TResult2>,
+}
+
+function initVirtualTimeline(): VirtualTimeline {
+
+  let lastEventVirtualTimeMs: number = 0
+  let virtualTimelineEvents: { [key: string]: VirtualTimelineEvent } = {}
+  let stopwatch: Stopwatch = initStopwatch()
+
+  return {
+    start() {
+      stopwatch.start()
+    },
+    stop() {
+      stopwatch.stop()
+    },
+    reset() {
+      lastEventVirtualTimeMs = 0
+      stopwatch = initStopwatch()
+      virtualTimelineEvents = {}
+    },
+    // We return a deep copy of the events to prevent inner state change by user
+    getEvents() {
+      return Object.values(virtualTimelineEvents).map((event: VirtualTimelineEvent) => {
+        return Object.assign({}, event)
+      })
+    },
+    getDuration() {
+      return lastEventVirtualTimeMs + stopwatch.read()
+    },
+    handleAwaitEvent(
+      requestIdentifier: string,
+    ) {
+      stopwatch.stop()
+
+      console.log(`Real time elapsed: ${lastEventVirtualTimeMs + stopwatch.read()}`)
+      console.log(`Predicted time elapsed: ${virtualTimelineEvents[requestIdentifier].endTimeMs}`)
+
+      let awaitTimeMs = Math.max(
+        lastEventVirtualTimeMs + stopwatch.read(),
+        virtualTimelineEvents[requestIdentifier].endTimeMs)
+      virtualTimelineEvents[requestIdentifier].awaitTimeMs = awaitTimeMs
+      lastEventVirtualTimeMs = awaitTimeMs                
+
+      stopwatch.reset()
+      stopwatch.start()
+    },
+    handleIssueEvent(
+      handlerHeader:string,
+      predictedTime: number
+    ) {
+      stopwatch.stop()
+
+      // Issue UUID for this http request
+      let requestIdentifier = uuidv4()
+      let issueTimeMs = lastEventVirtualTimeMs + stopwatch.read()
+      virtualTimelineEvents[requestIdentifier] = {
+        handlerHeader: handlerHeader,
+        startTimeMs: issueTimeMs,
+        endTimeMs: issueTimeMs + predictedTime,
+        awaitTimeMs: undefined
+      }
+      lastEventVirtualTimeMs = issueTimeMs
+
+      stopwatch.reset()
+      stopwatch.start()
+
+      return requestIdentifier
+    }
+  }
+}
+
+function trackedRestRequest(
+  promise: Promise<Response>,
+  requestIdentifier: string,
+  virtualTimeline: VirtualTimeline
+): TrackedRestRequest {
+
+  let internalPromise: Promise<Response> = promise
+
+  return {
+    unwrap(
+      onfulfilled?,
+      onrejected?,
+    ) {
+      // Must be in the same then callback, so as to avoid preemption.
+      // let x = Promise.resolve().then(() => console.log("1")).then(() => console.log("3"))
+      // let y = Promise.resolve().then(() => console.log("2"))
+      return internalPromise
+        .then((response: Response) => {
+
+          virtualTimeline.handleAwaitEvent(requestIdentifier)
+
+          if (onfulfilled != undefined || onfulfilled != null) {
+            return onfulfilled(response)
+          } else {
+            return response
+          }
+
+        }, (reason: any) => {
+
+          virtualTimeline.handleAwaitEvent(requestIdentifier)
+
+          if (onrejected != undefined || onrejected != null) {
+            return onrejected(reason)
+          } else {
+            return reason
+          }
+
+        })
+    }
+  }
+}
+
+function trackedServiceClient(
+  resolverDelaySecondsIndexedByHeader: { [key: string]: number },
+  virtualTimeline: VirtualTimeline
+): ServiceClientApi {
+
+  return {
+    issueHttpRequest(
+      link: string
+    ): TrackedRestRequest {
+
+      // TODO: Hardcoded header format here. Is there a way to pass this in?
+      let handlerHeader = `[rest] GET ${link}`
+      if (!resolverDelaySecondsIndexedByHeader.hasOwnProperty(handlerHeader)) {
+        throw new Error(`Predicted time taken missing for the header: ${handlerHeader}`)
+      }
+
+      let requestIdentifier = virtualTimeline.handleIssueEvent(
+        handlerHeader,
+        resolverDelaySecondsIndexedByHeader[handlerHeader] * 1000)
+
+      return trackedRestRequest(
+        axios.get(link),
+        requestIdentifier,
+        virtualTimeline
+      )
+    }  
+  }   
+}
+
+function initStopwatch(): Stopwatch {
+  let lastStart: number = 0
+  let elapsedTime: number = 0
+  let isRunning = false
+
+  return {
+    start() {
+      if (isRunning) {
+        return
+      }
+
+      lastStart = Date.now()
+      isRunning = true
+    },
+    stop() {
+      if (!isRunning) {
+        return
+      }
+
+      elapsedTime += Date.now() - lastStart
+      isRunning = false
+    },
+    read() {
+      if (isRunning) {
+        return elapsedTime + Date.now() - lastStart
+      } else {
+        return elapsedTime
+      }
+    },
+    reset() {
+      elapsedTime = 0
+      lastStart = 0
+      isRunning = false
+    }
+  }
 }
 
 /**
@@ -92,16 +322,38 @@ export function createSetupServer(...interceptors: Interceptor[]) {
       }
     })
 
-    let requestHandlerInvocations: { [key: string]: number; } = {}
+    let requestHandlerInvocationTimings: RequestHandlerInvocationTimings[] = [];
+    let requestHandlerInvocationCount: { [key: string]: number; } = {}
     let metaInfoIndexedByHeader: { [key: string]: RequestHandlerMetaInfo } = {}
     currentHandlers.forEach((handler) => {
-      requestHandlerInvocations[handler.getMetaInfo().header] = 0
+      requestHandlerInvocationCount[handler.getMetaInfo().header] = 0
       metaInfoIndexedByHeader[handler.getMetaInfo().header] = handler.getMetaInfo()
     })
     let runtimeSamples: ModelServiceSampleResult[] | undefined = undefined
-    let resolverDelaysIndexedByHeader: { [key: string]: number } = {}    
+    let resolverDelaySecondsIndexedByHeader: { [key: string]: number } = {}
+
+    // For virtual timeline construction
+    let virtualTimeline: VirtualTimeline = initVirtualTimeline()
 
     return {
+      getVirtualTimelineEvents() {
+        return virtualTimeline.getEvents()
+      },
+      startVirtualTimeline() {
+        virtualTimeline.reset()
+        virtualTimeline.start()
+      },
+      stopVirtualTimeline() {
+        virtualTimeline.stop()
+      },
+      getVirtualTimelineDuration() {
+        return virtualTimeline.getDuration()
+      },
+      getTrackedServiceClient() {
+        return trackedServiceClient(resolverDelaySecondsIndexedByHeader, virtualTimeline)
+      },
+      // Use this method if we need to sample the performance model before the test
+      // in order to place the correct delays.
       async registerModelSampleDelays() {
         if (runtimeSamples == undefined) {
           runtimeSamples = await getRuntimeSamplesForModels(currentHandlers)
@@ -123,7 +375,7 @@ export function createSetupServer(...interceptors: Interceptor[]) {
   
           }
 
-          resolverDelaysIndexedByHeader[header] = averageResponseTime
+          resolverDelaySecondsIndexedByHeader[header] = averageResponseTime
         })
 
       },
@@ -151,12 +403,15 @@ export function createSetupServer(...interceptors: Interceptor[]) {
   
           return {
             "handlerHeader": header,
-            "invocationCount": requestHandlerInvocations[header],
+            "invocationCount": requestHandlerInvocationCount[header],
             "averageResponseTime": averageResponseTime
           }
         })
 
-        return aggregatedResponses
+        return {
+          aggregatedResponses: aggregatedResponses,
+          invocationTimings: requestHandlerInvocationTimings
+        }
       },
       listen(options) {
 
@@ -167,6 +422,8 @@ export function createSetupServer(...interceptors: Interceptor[]) {
         )
 
         interceptor.use(async (req) => {
+
+          const invocationStartTime = Date.now()
 
           const requestId = uuidv4()
 
@@ -240,11 +497,17 @@ export function createSetupServer(...interceptors: Interceptor[]) {
           // Match registered, we track invocation count.
           if (handler != undefined) {
             let handlerHeader = handler.getMetaInfo().header
-            if (requestHandlerInvocations.hasOwnProperty(handlerHeader)) {
-              requestHandlerInvocations[handlerHeader] += 1
+            if (requestHandlerInvocationCount.hasOwnProperty(handlerHeader)) {
+              requestHandlerInvocationCount[handlerHeader] += 1
             } else {
               console.warn("Handler found whose invocation is not being tracked!" + handlerHeader);
             }
+
+            requestHandlerInvocationTimings.push({
+              handlerHeader: handlerHeader,
+              startTime: invocationStartTime,
+              endTime: resolverDelaySecondsIndexedByHeader[handlerHeader] * 1000 + invocationStartTime
+            });
           }
 
           return new Promise<MockedInterceptedResponse>((resolve) => {
@@ -256,11 +519,11 @@ export function createSetupServer(...interceptors: Interceptor[]) {
             }
 
             // If mocked using performance model, impose delay!
-            if (handler != undefined) {
-              let header = handler.getMetaInfo().header
-              response.delay = resolverDelaysIndexedByHeader[header] ?? response.delay
-              console.log(`Imposing a delay of ${response.delay} for header: ${header}`)
-            }
+            // if (handler != undefined) {
+            //   let header = handler.getMetaInfo().header
+            //   response.delay = resolverDelaySecondsIndexedByHeader[header] * 1000 ?? response.delay
+            //   console.log(`Imposing a delay of ${response.delay} ms for header: ${header}`)
+            // }
 
             // the node build will use the timers module to ensure @sinon/fake-timers or jest fake timers
             // don't affect this timeout.
@@ -393,11 +656,8 @@ function getRuntimeSamplesForModels(
       return modelServiceSampleResults      
       
     }, (error: AxiosError) => {
-      console.error(`Sample request failed for model endpoint: ${modelServiceEndpoint}`)
-      console.error(error.message)
-      return null;
+      throw new Error(`Sample request failed for model endpoint: ${modelServiceEndpoint}. Error message: ${error.message}`)
     })
-
 
     sampleRequestPromises.push(modelServicePromise)          
   }
