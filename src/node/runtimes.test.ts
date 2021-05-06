@@ -10,6 +10,7 @@ const materialsModelEndpoint = "http://localhost:8080/"
 // const materialsModelEndpoint = "https://prodmodelsvc.azurewebsites.net"
 const localMaterialsEndpoint = "http://127.0.0.1:5000/resources?year=2020&course=20002"
 const otherMaterialsEndpoint = "http://127.0.0.1:5000/resources"
+// const materialsEndpoint = "https://api-materials.doc.ic.ac.uk/courses/2021"
 
 const server = setupServer(
   rest.get(localMaterialsEndpoint, (req, res, ctx) => {

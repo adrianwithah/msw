@@ -22,6 +22,8 @@ import { writeFileSync, readFileSync } from 'fs';
 const ejs = require('ejs');
 const path = require("path");
 
+const mswVirtualTimeHeader = "X-Msw-Tracking"
+
 export type EndpointPerformanceReport = {
   aggregatedResponses: AggregatedResponse[],
   invocationTimings: RequestHandlerInvocationTimings[]
@@ -57,7 +59,7 @@ interface VirtualTimeline {
   start(): void
   stop(): void
   reset(): void
-  getEvents(): VirtualTimelineEvent[]
+  getEvents(): { [key: string]: VirtualTimelineEvent }
   getDuration(): number
   handleIssueEvent(handlerHeader: string, predictedTime: number): string
   handleAwaitEvent(requestIdentifier: string): void
@@ -128,9 +130,7 @@ function initVirtualTimeline(): VirtualTimeline {
     },
     // We return a deep copy of the events to prevent inner state change by user
     getEvents() {
-      return Object.values(virtualTimelineEvents).map((event: VirtualTimelineEvent) => {
-        return Object.assign({}, event)
-      })
+      return virtualTimelineEvents
     },
     getDuration() {
       return lastEventVirtualTimeMs + stopwatch.read()
@@ -186,12 +186,7 @@ export function PerformanceTest(
   options?: PerformanceTestOptions | undefined,
 ): () => Promise<any> {
 
-  if (
-    options != undefined &&
-    options.mutePerformanceCheckTill != undefined &&
-    fn != undefined &&
-    options.mockServer != undefined
-  ) {
+  if (options?.mockServer != undefined) {
     
     let convertFailToWarn = false;
 
@@ -205,7 +200,10 @@ export function PerformanceTest(
       date_timezoned.getUTCMinutes(),
       date_timezoned.getUTCSeconds())
 
-    if (date_utc < options.mutePerformanceCheckTill.getTime()) {
+    if (
+      options.mutePerformanceCheckTill != undefined &&
+      date_utc < options.mutePerformanceCheckTill.getTime()
+    ) {
       convertFailToWarn = true;
     }
 
@@ -276,6 +274,7 @@ function genPerfReport(
   fullDurationMs: number
 ) {
   let ejsString = readFileSync(path.resolve(__dirname, "../report.ejs"), 'utf-8')
+
   let html = ejs.render(ejsString, {
     invocationTimings: JSON.stringify(invocationTimings),
     fullDuration: fullDurationMs
@@ -338,6 +337,7 @@ function trackedServiceClient(
 
       // TODO: Hardcoded header format here. Is there a way to pass this in?
       let handlerHeader = `[rest] GET ${link}`
+      // TODO: Handle cases where we use this to issue requests to unmocked endpoints.
       if (!resolverDelaySecondsIndexedByHeader.hasOwnProperty(handlerHeader)) {
         throw new Error(`Predicted time taken missing for the header: ${handlerHeader}`)
       }
@@ -346,8 +346,13 @@ function trackedServiceClient(
         handlerHeader,
         resolverDelaySecondsIndexedByHeader[handlerHeader] * 1000)
 
+      let customMswHeader: any = {}
+      customMswHeader[mswVirtualTimeHeader] = 'virtual'
+
       return trackedRestRequest(
-        axios.get(link),
+        axios.get(link, {
+          headers: customMswHeader
+        }),
         requestIdentifier,
         virtualTimeline
       )
@@ -447,7 +452,9 @@ export function createSetupServer(...interceptors: Interceptor[]) {
 
     return {
       getVirtualTimelineEvents() {
-        return virtualTimeline.getEvents()
+        return Object.values(virtualTimeline.getEvents()).map((event: VirtualTimelineEvent) => {
+          return Object.assign({}, event)
+        })
       },
       startVirtualTimeline() {
         virtualTimeline.reset()
@@ -533,116 +540,142 @@ export function createSetupServer(...interceptors: Interceptor[]) {
 
         interceptor.use(async (req) => {
 
-          const invocationStartTime = Date.now()
-
-          const requestId = uuidv4()
-
-          const requestHeaders = new Headers(
-            flattenHeadersObject(req.headers || {}),
-          )
-
-          if (req.headers) {
-            req.headers['x-msw-request-id'] = requestId
-          }
-
-          const requestCookieString = requestHeaders.get('cookie')
-
-          const mockedRequest: MockedRequest = {
-            id: requestId,
-            url: req.url,
-            method: req.method,
-            // Parse the request's body based on the "Content-Type" header.
-            body: parseBody(req.body, requestHeaders),
-            headers: requestHeaders,
-            cookies: {},
-            params: {},
-            redirect: 'manual',
-            referrer: '',
-            keepalive: false,
-            cache: 'default',
-            mode: 'cors',
-            referrerPolicy: 'no-referrer',
-            integrity: '',
-            destination: 'document',
-            bodyUsed: false,
-            credentials: 'same-origin',
-          }
-
-          emitter.emit('request:start', mockedRequest)
-
-          if (requestCookieString) {
-            // Set mocked request cookies from the `cookie` header of the original request.
-            // No need to take `credentials` into account, because in NodeJS requests are intercepted
-            // _after_ they happen. Request issuer should have already taken care of sending relevant cookies.
-            // Unlike browser, where interception is on the worker level, _before_ the request happens.
-            mockedRequest.cookies = cookieUtils.parse(requestCookieString)
-          }
-
-          if (mockedRequest.headers.get('x-msw-bypass')) {
-            emitter.emit('request:end', mockedRequest)
-            return
-          }
-
-          const { response, handler } = await getResponse(
-            mockedRequest,
-            currentHandlers,
-          )
-
-          if (!handler) {
-            emitter.emit('request:unhandled', mockedRequest)
-          }
-
-          if (!response) {
-            emitter.emit('request:end', mockedRequest)
-
-            onUnhandledRequest(
-              mockedRequest,
-              resolvedOptions.onUnhandledRequest,
+          try {
+            virtualTimeline.stop()
+  
+            const invocationStartTime = Date.now()
+  
+            const requestId = uuidv4()
+  
+            const requestHeaders = new Headers(
+              flattenHeadersObject(req.headers || {}),
             )
-            return
-          }
-
-          emitter.emit('request:match', mockedRequest)
-
-          // Match registered, we track invocation count.
-          if (handler != undefined) {
-            let handlerHeader = handler.getMetaInfo().header
-            if (requestHandlerInvocationCount.hasOwnProperty(handlerHeader)) {
-              requestHandlerInvocationCount[handlerHeader] += 1
-            } else {
-              console.warn("Handler found whose invocation is not being tracked!" + handlerHeader);
+  
+            if (req.headers) {
+              req.headers['x-msw-request-id'] = requestId
             }
-
-            requestHandlerInvocationTimings.push({
-              handlerHeader: handlerHeader,
-              startTime: invocationStartTime,
-              endTime: resolverDelaySecondsIndexedByHeader[handlerHeader] * 1000 + invocationStartTime
-            });
-          }
-
-          return new Promise<MockedInterceptedResponse>((resolve) => {
-            const mockedResponse = {
-              status: response.status,
-              statusText: response.statusText,
-              headers: response.headers.getAllHeaders(),
-              body: response.body as string,
+  
+            const requestCookieString = requestHeaders.get('cookie')
+  
+            const mockedRequest: MockedRequest = {
+              id: requestId,
+              url: req.url,
+              method: req.method,
+              // Parse the request's body based on the "Content-Type" header.
+              body: parseBody(req.body, requestHeaders),
+              headers: requestHeaders,
+              cookies: {},
+              params: {},
+              redirect: 'manual',
+              referrer: '',
+              keepalive: false,
+              cache: 'default',
+              mode: 'cors',
+              referrerPolicy: 'no-referrer',
+              integrity: '',
+              destination: 'document',
+              bodyUsed: false,
+              credentials: 'same-origin',
             }
+  
+            emitter.emit('request:start', mockedRequest)
+  
+            if (requestCookieString) {
+              // Set mocked request cookies from the `cookie` header of the original request.
+              // No need to take `credentials` into account, because in NodeJS requests are intercepted
+              // _after_ they happen. Request issuer should have already taken care of sending relevant cookies.
+              // Unlike browser, where interception is on the worker level, _before_ the request happens.
+              mockedRequest.cookies = cookieUtils.parse(requestCookieString)
+            }
+  
+            if (mockedRequest.headers.get('x-msw-bypass')) {
+              emitter.emit('request:end', mockedRequest)
+              return
+            }
+  
+            const { response, handler } = await getResponse(
+              mockedRequest,
+              currentHandlers,
+            )
+  
+            if (!handler) {
+              emitter.emit('request:unhandled', mockedRequest)
+            }
+  
+            if (!response) {
+              emitter.emit('request:end', mockedRequest)
+  
+              onUnhandledRequest(
+                mockedRequest,
+                resolvedOptions.onUnhandledRequest,
+              )
+              return
+            }
+  
+            emitter.emit('request:match', mockedRequest)
+  
+            // Match registered, we track invocation count.
+            if (handler != undefined) {
+              let handlerHeader = handler.getMetaInfo().header
+              if (requestHandlerInvocationCount.hasOwnProperty(handlerHeader)) {
+                requestHandlerInvocationCount[handlerHeader] += 1
+              } else {
+                console.warn("Handler found whose invocation is not being tracked!" + handlerHeader);
+              }
+  
+              requestHandlerInvocationTimings.push({
+                handlerHeader: handlerHeader,
+                startTime: invocationStartTime,
+                endTime: resolverDelaySecondsIndexedByHeader[handlerHeader] * 1000 + invocationStartTime
+              });
+            }
+  
+            return new Promise<MockedInterceptedResponse>((resolve) => {
+              const mockedResponse = {
+                status: response.status,
+                statusText: response.statusText,
+                headers: response.headers.getAllHeaders(),
+                body: response.body as string,
+              }
 
-            // If mocked using performance model, impose delay!
-            // if (handler != undefined) {
-            //   let header = handler.getMetaInfo().header
-            //   response.delay = resolverDelaySecondsIndexedByHeader[header] * 1000 ?? response.delay
-            //   console.log(`Imposing a delay of ${response.delay} ms for header: ${header}`)
-            // }
+              let usingVirtualTime = false
+              if (req.headers != undefined && req.headers[mswVirtualTimeHeader] == 'virtual') {
+                usingVirtualTime = true
+              }
 
-            // the node build will use the timers module to ensure @sinon/fake-timers or jest fake timers
-            // don't affect this timeout.
-            setTimeout(() => {
-              resolve(mockedResponse)
-            }, response.delay ?? 0)
+              // If mocked using performance model and not using virtual time, impose delay!
+              let handlerHeader = handler?.getMetaInfo().header
+              if (
+                handlerHeader != null &&
+                resolverDelaySecondsIndexedByHeader.hasOwnProperty(handlerHeader) &&
+                usingVirtualTime
+              ) {
 
-            emitter.emit('request:end', mockedRequest)
-          })
+                response.delay = resolverDelaySecondsIndexedByHeader[handlerHeader] * 1000 ?? response.delay
+  
+                virtualTimeline.getEvents()[uuidv4()] = {
+                  handlerHeader: handlerHeader,
+                  startTimeMs: virtualTimeline.getDuration(),
+                  endTimeMs: virtualTimeline.getDuration() + response.delay,
+                  awaitTimeMs: undefined,
+                }
+  
+              }
+  
+              // the node build will use the timers module to ensure @sinon/fake-timers or jest fake timers
+              // don't affect this timeout.
+              setTimeout(() => {
+                resolve(mockedResponse)
+              }, response.delay ?? 0)
+  
+              emitter.emit('request:end', mockedRequest)
+            })
+
+          } finally {
+
+            virtualTimeline.start()
+            
+          }
         })
       },
 
