@@ -643,13 +643,20 @@ export function createSetupServer(...interceptors: Interceptor[]) {
                 usingVirtualTime = true
               }
 
+              
               // If mocked using performance model and not using virtual time, impose delay!
               let handlerHeader = handler?.getMetaInfo().header
+              if (handlerHeader != undefined) {
+                console.log(`Checks for handlerHeader: ${handlerHeader}: ${handlerHeader != null}, ${resolverDelaySecondsIndexedByHeader.hasOwnProperty(handlerHeader)}, ${usingVirtualTime}`)  
+              }
+
               if (
                 handlerHeader != null &&
                 resolverDelaySecondsIndexedByHeader.hasOwnProperty(handlerHeader) &&
-                usingVirtualTime
+                !usingVirtualTime
               ) {
+
+                console.log(`Imposing delay of ${resolverDelaySecondsIndexedByHeader[handlerHeader]} seconds for the header ${handlerHeader}`)
 
                 response.delay = resolverDelaySecondsIndexedByHeader[handlerHeader] * 1000 ?? response.delay
   
